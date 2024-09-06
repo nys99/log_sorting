@@ -10,26 +10,58 @@ async function asyncSortedMerge(logSources, printer) {
     (a, b) => a.log.date.getTime() - b.log.date.getTime()
   );
 
-  // asynchronously init the min heap with first log from each source
+  const BATCH_SIZE = 700;
+  const bufferMap = new Map();
+
+  // init the buffers with a batch of logs from each source
   await Promise.all(
     logSources.map(async (source) => {
-      const log = await source.popAsync();
-      if (log) {
-        console.log("Adding to heap:", log.date);
-        minHeap.push({ log, source });
+      const logs = [];
+      for (let i = 0; i < BATCH_SIZE; i++) {
+        const log = await source.popAsync();
+        if (log) {
+          logs.push(log);
+        } else {
+          break;
+        }
       }
+      bufferMap.set(source, logs);
     })
   );
 
-  // process the heap
+  // init the min heap with first log from each buffer
+  bufferMap.forEach((logs, source) => {
+    if (logs.length > 0) {
+      minHeap.push({ log: logs.shift(), source });
+    }
+  });
+
   while (!minHeap.isEmpty()) {
     const { log, source } = minHeap.pop();
     printer.print(log);
 
-    const nextLog = await source.pop();
-    if (nextLog) {
-      console.log("Adding to heap:", nextLog.date);
-      minHeap.push({ log: nextLog, source });
+    // fetch the buffer for the source
+    const buffer = bufferMap.get(source);
+
+    // check if buffer is empty
+    if (buffer.length > 0) {
+      minHeap.push({ log: buffer.shift(), source });
+    } else {
+      // create and await promises to fetch logs
+      const promises = [];
+      for (let i = 0; i < BATCH_SIZE; i++) {
+        promises.push(source.popAsync());
+      }
+      const logs = await Promise.all(promises);
+
+      // filter out results where all logs were drained
+      const newLogs = logs.filter((log) => !!log);
+
+      // update buffer with logs and push first log into the heap
+      if (newLogs.length > 0) {
+        minHeap.push({ log: newLogs.shift(), source });
+        bufferMap.set(source, newLogs);
+      }
     }
   }
 
